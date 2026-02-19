@@ -127,7 +127,7 @@ jobs:
           -Ddefault_library=shared -Ddatabase=simple \
           -Dalsa=disabled -Dx11=disabled -Ddbus=disabled -Dglib=disabled \
           -Dgtk=disabled -Dsystemd=disabled -Dudev=disabled -Dopenssl=disabled \
-          -Dtests=false -Dman=false -Ddaemon=false -Doss-output=disabled
+          -Dtests=false -Dman=false -Ddaemon=false -Doss-output=disabled -Ddoxygen=false
 
         meson compile -C build-$arch
         meson install -C build-$arch
