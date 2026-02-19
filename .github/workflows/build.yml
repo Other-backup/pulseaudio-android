@@ -89,11 +89,10 @@ jobs:
 
         # 4. Configurar e Compilar com Meson
         meson setup build-$arch --cross-file ../android-cross-$arch.txt --prefix=$ROOT_DIR \
-          -Dshared-libs=true -Dstatic-libs=false -Ddatabase=simple \
+          -Ddefault_library=shared -Ddatabase=simple \
           -Dalsa=disabled -Dx11=disabled -Ddbus=disabled -Dglib=disabled \
           -Dgtk=disabled -Dsystemd=disabled -Dudev=disabled -Dopenssl=disabled \
           -Dtests=false -Dman=false -Ddaemon=false -Doss-output=disabled
-
         meson compile -C build-$arch
         meson install -C build-$arch
         popd
