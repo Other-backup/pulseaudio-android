@@ -27,6 +27,10 @@ jobs:
         export ROOT_DIR="$BASE_DIR/root-$arch"
         export PATH=$ROOT_DIR/bin:$PATH
         export PKG_CONFIG_PATH=$ROOT_DIR/lib/pkgconfig
+        
+        # Injetando as pastas de include para as dependências se encontrarem
+        export CFLAGS="-O2 -I$ROOT_DIR/include"
+        export LDFLAGS="-L$ROOT_DIR/lib"
 
         if [ "$arch" = "arm64" ]; then
           BUILDCHAIN=aarch64-linux-android
@@ -47,6 +51,28 @@ jobs:
         export CXX="$TOOLCHAIN/${BUILDCHAIN}${API_LEVEL}-clang++"
         export AR="$TOOLCHAIN/llvm-ar"
         export STRIP="$TOOLCHAIN/llvm-strip"
+
+        # =========================================================
+        # TRUQUE ANTI-ERRO: Criar Header Dummy para o libintl (gettext)
+        # O Android não tem isso nativamente, então criamos macros vazias.
+        # =========================================================
+        mkdir -p $ROOT_DIR/include
+        cat <<EOF > $ROOT_DIR/include/libintl.h
+        #ifndef LIBINTL_H
+        #define LIBINTL_H
+        #define _(String) (String)
+        #define N_(String) (String)
+        #define textdomain(Domain) (Domain)
+        #define bindtextdomain(Package, Directory) (Package)
+        #define bind_textdomain_codeset(Domain, Codeset) (Codeset)
+        #define dgettext(Domain, String) (String)
+        #define dcgettext(Domain, String, Category) (String)
+        #define ngettext(Msgid1, Msgid2, N) ((N) == 1 ? (Msgid1) : (Msgid2))
+        #define dngettext(Domain, Msgid1, Msgid2, N) ((N) == 1 ? (Msgid1) : (Msgid2))
+        #define dcngettext(Domain, Msgid1, Msgid2, N, Category) ((N) == 1 ? (Msgid1) : (Msgid2))
+        #define gettext(String) (String)
+        #endif
+        EOF
 
         # 1. Construir libtool (ltdl)
         wget https://ftpmirror.gnu.org/libtool/libtool-2.4.7.tar.gz
@@ -71,7 +97,10 @@ jobs:
         pushd pulseaudio
         git checkout v17.0
 
-        # Criar o arquivo de Cross-Compilation do Meson
+        # TRUQUE 2: Remover a exigência da libintl do script do Meson
+        sed -i "s/cc.find_library('intl')/\[\]/g" meson.build
+
+        # O Meson cross-file com os paths corretos passados nas opções built-in
         cat <<EOF > ../android-cross-$arch.txt
         [binaries]
         c = '$CC'
@@ -79,6 +108,12 @@ jobs:
         ar = '$AR'
         strip = '$STRIP'
         pkgconfig = 'pkg-config'
+
+        [built-in options]
+        c_args = ['-O2', '-I$ROOT_DIR/include']
+        cpp_args = ['-O2', '-I$ROOT_DIR/include']
+        c_link_args = ['-L$ROOT_DIR/lib']
+        cpp_link_args = ['-L$ROOT_DIR/lib']
 
         [host_machine]
         system = 'android'
@@ -92,7 +127,8 @@ jobs:
           -Ddefault_library=shared -Ddatabase=simple \
           -Dalsa=disabled -Dx11=disabled -Ddbus=disabled -Dglib=disabled \
           -Dgtk=disabled -Dsystemd=disabled -Dudev=disabled -Dopenssl=disabled \
-          -Dtests=false -Dman=false -Ddaemon=false -Doss-output=disabled -Dnls=disabled
+          -Dtests=false -Dman=false -Ddaemon=false -Doss-output=disabled
+
         meson compile -C build-$arch
         meson install -C build-$arch
         popd
@@ -112,7 +148,6 @@ jobs:
 
         cp -a $ROOT_DIR/lib/pulse-${PA_VERSION}/modules/libprotocol-native.so release/$arch/modules/libprotocol-native.so
         cp -a $ROOT_DIR/lib/pulse-${PA_VERSION}/modules/module-native-protocol-unix.so release/$arch/modules/module-native-protocol-unix.so
-        cp -a $ROOT_DIR/lib/pulse-${PA_VERSION}/modules/module-aaudio-sink.so release/$arch/modules/module-aaudio-sink.so
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
