@@ -1,0 +1,122 @@
+name: Build PulseAudio for Android
+
+on:
+  workflow_dispatch: # Permite rodar o script manualmente na aba Actions
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [arm64, armhf]
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install Build Tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y meson ninja-build pkg-config libtool automake autoconf gettext wget xz-utils
+
+    - name: Cross-Compile PulseAudio
+      run: |
+        export NDK_PATH=$ANDROID_NDK_LATEST_HOME
+        export BASE_DIR=$PWD
+        export arch=${{ matrix.arch }}
+        export ROOT_DIR="$BASE_DIR/root-$arch"
+        export PATH=$ROOT_DIR/bin:$PATH
+        export PKG_CONFIG_PATH=$ROOT_DIR/lib/pkgconfig
+
+        if [ "$arch" = "arm64" ]; then
+          BUILDCHAIN=aarch64-linux-android
+          OUTPUT_DIR="$BASE_DIR/output/aarch64-linux-gnu"
+          MESON_CPU_FAMILY="aarch64"
+          MESON_CPU="armv8-a"
+          API_LEVEL=26
+        else
+          BUILDCHAIN=armv7a-linux-androideabi
+          OUTPUT_DIR="$BASE_DIR/output/arm-linux-gnueabihf"
+          MESON_CPU_FAMILY="arm"
+          MESON_CPU="armv7-a"
+          API_LEVEL=26
+        fi
+
+        export TOOLCHAIN="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin"
+        export CC="$TOOLCHAIN/${BUILDCHAIN}${API_LEVEL}-clang"
+        export CXX="$TOOLCHAIN/${BUILDCHAIN}${API_LEVEL}-clang++"
+        export AR="$TOOLCHAIN/llvm-ar"
+        export STRIP="$TOOLCHAIN/llvm-strip"
+
+        # 1. Construir libtool (ltdl)
+        wget https://ftpmirror.gnu.org/libtool/libtool-2.4.7.tar.gz
+        tar -xf libtool-2.4.7.tar.gz
+        pushd libtool-2.4.7
+        ./configure --host=$BUILDCHAIN --prefix=$ROOT_DIR HELP2MAN=/bin/true MAKEINFO=/bin/true
+        make -j$(nproc)
+        make install
+        popd
+
+        # 2. Construir libsndfile
+        wget https://github.com/libsndfile/libsndfile/releases/download/1.2.2/libsndfile-1.2.2.tar.xz
+        tar -xf libsndfile-1.2.2.tar.xz
+        pushd libsndfile-1.2.2
+        ./configure --host=$BUILDCHAIN --prefix=$ROOT_DIR --disable-external-libs --disable-alsa --disable-sqlite
+        make -j$(nproc)
+        make install
+        popd
+
+        # 3. Baixar PulseAudio Upstream (v17.0)
+        git clone https://gitlab.freedesktop.org/pulseaudio/pulseaudio.git
+        pushd pulseaudio
+        git checkout v17.0
+
+        # Criar o arquivo de Cross-Compilation do Meson
+        cat <<EOF > ../android-cross-$arch.txt
+        [binaries]
+        c = '$CC'
+        cpp = '$CXX'
+        ar = '$AR'
+        strip = '$STRIP'
+        pkgconfig = 'pkg-config'
+
+        [host_machine]
+        system = 'android'
+        cpu_family = '$MESON_CPU_FAMILY'
+        cpu = '$MESON_CPU'
+        endian = 'little'
+        EOF
+
+        # 4. Configurar e Compilar com Meson
+        meson setup build-$arch --cross-file ../android-cross-$arch.txt --prefix=$ROOT_DIR \
+          -Dshared-libs=true -Dstatic-libs=false -Ddatabase=simple \
+          -Dalsa=disabled -Dx11=disabled -Ddbus=disabled -Dglib=disabled \
+          -Dgtk=disabled -Dsystemd=disabled -Dudev=disabled -Dopenssl=disabled \
+          -Dtests=false -Dman=false -Ddaemon=false -Doss-output=disabled
+
+        meson compile -C build-$arch
+        meson install -C build-$arch
+        popd
+
+        # 5. Organizar arquivos para o Artefato
+        mkdir -p release/$arch/modules
+        PA_VERSION="17.0"
+
+        cp -a $ROOT_DIR/bin/pulseaudio release/$arch/libpulseaudio.so
+        cp -a $ROOT_DIR/bin/pactl release/$arch/pactl
+
+        cp -a $ROOT_DIR/lib/pulseaudio/libpulsecommon-${PA_VERSION}.so release/$arch/libpulsecommon-${PA_VERSION}.so
+        cp -a $ROOT_DIR/lib/pulseaudio/libpulsecore-${PA_VERSION}.so release/$arch/libpulsecore-${PA_VERSION}.so
+        cp -a $ROOT_DIR/lib/libpulse.so release/$arch/libpulse.so
+        cp -a $ROOT_DIR/lib/libsndfile.so release/$arch/libsndfile.so
+        cp -a $ROOT_DIR/lib/libltdl.so release/$arch/libltdl.so
+
+        cp -a $ROOT_DIR/lib/pulse-${PA_VERSION}/modules/libprotocol-native.so release/$arch/modules/libprotocol-native.so
+        cp -a $ROOT_DIR/lib/pulse-${PA_VERSION}/modules/module-native-protocol-unix.so release/$arch/modules/module-native-protocol-unix.so
+        cp -a $ROOT_DIR/lib/pulse-${PA_VERSION}/modules/module-aaudio-sink.so release/$arch/modules/module-aaudio-sink.so
+
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: pulseaudio-android-${{ matrix.arch }}
+        path: release/${{ matrix.arch }}/*
