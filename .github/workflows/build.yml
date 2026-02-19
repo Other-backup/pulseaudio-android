@@ -56,12 +56,13 @@ jobs:
         # TRUQUE ANTI-ERRO: Criar Header Dummy para o libintl (gettext)
         # O Android não tem isso nativamente, então criamos macros vazias.
         # =========================================================
+        # =========================================================
+        # TRUQUE ANTI-ERRO: Criar Header Dummy para o libintl (gettext)
+        # =========================================================
         mkdir -p $ROOT_DIR/include
         cat <<EOF > $ROOT_DIR/include/libintl.h
         #ifndef LIBINTL_H
         #define LIBINTL_H
-        #define _(String) (String)
-        #define N_(String) (String)
         #define textdomain(Domain) (Domain)
         #define bindtextdomain(Package, Directory) (Package)
         #define bind_textdomain_codeset(Domain, Codeset) (Codeset)
@@ -73,6 +74,9 @@ jobs:
         #define gettext(String) (String)
         #endif
         EOF
+
+
+
 
         # 1. Construir libtool (ltdl)
         wget https://ftpmirror.gnu.org/libtool/libtool-2.4.7.tar.gz
