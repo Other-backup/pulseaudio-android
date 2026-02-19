@@ -104,6 +104,10 @@ jobs:
         # TRUQUE 2: Remover a exigência da libintl do script do Meson
         sed -i "s/cc.find_library('intl')/\[\]/g" meson.build
 
+        # TRUQUE 3: Desativar execinfo/backtrace (o linker do Android engana o teste, mas falha no header)
+        sed -i "s/cc.has_function('backtrace')/false/g" meson.build
+        sed -i "s/cc.has_header('execinfo.h')/false/g" meson.build
+
         # O Meson cross-file com os paths corretos passados nas opções built-in
         cat <<EOF > ../android-cross-$arch.txt
         [binaries]
