@@ -1,0 +1,113 @@
+O problema está claro agora. `thunk64_vkCreateSwapchainKHR` vai diretamente para `X11DRV_vkCreateSwapchainKHR` — a layer nunca é chamada no meio. O Wine's winevulkan resolve as funções via sua própria tabela interna (`wine_vk_get_device_proc_addr Found name="vkCreateSwapchainKHR" in device table`) e não passa pelo `WSIBridge_GetDeviceProcAddr`. O loader do Wine tem sua própria dispatch table que foi populada na criação do device, antes dos hooks da layer.
+
+O Wine não respeitou os hooks retornados em `GetDeviceProcAddr` porque o winevulkan tem uma camada interna própria que consome os device procs sem repassar para a layer. As mensagens `wine_vk_get_device_proc_addr Found name="vkCreateSwapchainKHR"` confirmam isso — a função vem da tabela interna do winevulkan, não da layer.
+
+Novo prompt:
+
+---
+
+# Prompt Codex — Interceptar QueuePresentKHR via GIPA, não GDPA
+
+## Problema confirmado no logcat
+
+A layer retorna os hooks corretamente em `GetDeviceProcAddr`:
+```
+WSIBridge_GetDeviceProcAddr: returning hook for vkCreateSwapchainKHR
+WSIBridge_GetDeviceProcAddr: returning hook for vkQueuePresentKHR
+```
+
+Mas o winevulkan **ignora** esses hooks. Quando o DXVK chama `vkCreateSwapchainKHR`, o trace mostra:
+```
+thunk64_vkCreateSwapchainKHR → X11DRV_vkCreateSwapchainKHR
+```
+
+A layer nunca aparece no meio. Isso acontece porque o winevulkan do Proton tem uma dispatch table interna populada em `vkCreateDevice` com os ponteiros resolvidos na época da criação do device — ele não re-consulta `GetDeviceProcAddr` por chamada. Os hooks retornados depois são ignorados.
+
+A solução correta é interceptar via `GetInstanceProcAddr`, que o winevulkan **si** consulta para resolver as funções de instância e surface. O `vkQueuePresentKHR` especificamente é consultado via GIPA na inicialização do presenter do DXVK.
+
+## Tarefa única
+
+**Arquivo:** `wsi_bridge_layer.cpp`
+
+Em `WSIBridge_GetInstanceProcAddr`, além dos hooks já existentes, adicionar intercepção para `vkQueuePresentKHR`. O DXVK resolve esse proc via GIPA no início, então a layer pode capturá-lo aí:
+
+```cpp
+// Em WSIBridge_GetInstanceProcAddr:
+if (strcmp(pName, "vkQueuePresentKHR") == 0)
+    return reinterpret_cast<PFN_vkVoidFunction>(WSIBridge_QueuePresentKHR);
+if (strcmp(pName, "vkCreateSwapchainKHR") == 0)
+    return reinterpret_cast<PFN_vkVoidFunction>(WSIBridge_CreateSwapchainKHR);
+if (strcmp(pName, "vkDestroySwapchainKHR") == 0)
+    return reinterpret_cast<PFN_vkVoidFunction>(WSIBridge_DestroySwapchainKHR);
+if (strcmp(pName, "vkBindImageMemory") == 0)
+    return reinterpret_cast<PFN_vkVoidFunction>(WSIBridge_BindImageMemory);
+if (strcmp(pName, "vkBindImageMemory2") == 0 || strcmp(pName, "vkBindImageMemory2KHR") == 0)
+    return reinterpret_cast<PFN_vkVoidFunction>(WSIBridge_BindImageMemory2);
+```
+
+**Isso já existe** — mas verificar se a ordem no `GetInstanceProcAddr` coloca esses checks **antes** do fallback para a dispatch table de instância. Se o fallback vier antes, a layer retorna o proc da chain em vez do hook.
+
+O padrão correto é:
+
+```cpp
+VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL
+WSIBridge_GetInstanceProcAddr(VkInstance instance, const char* pName) {
+    if (!pName) return nullptr;
+
+    // 1. Self
+    if (strcmp(pName, "vkGetInstanceProcAddr") == 0)
+        return (PFN_vkVoidFunction)WSIBridge_GetInstanceProcAddr;
+    if (strcmp(pName, "vkGetDeviceProcAddr") == 0)
+        return (PFN_vkVoidFunction)WSIBridge_GetDeviceProcAddr;
+
+    // 2. Instance hooks
+    if (strcmp(pName, "vkCreateInstance") == 0)       return (PFN_vkVoidFunction)WSIBridge_CreateInstance;
+    if (strcmp(pName, "vkDestroyInstance") == 0)      return (PFN_vkVoidFunction)WSIBridge_DestroyInstance;
+    if (strcmp(pName, "vkCreateDevice") == 0)         return (PFN_vkVoidFunction)WSIBridge_CreateDevice;
+    if (strcmp(pName, "vkCreateXlibSurfaceKHR") == 0) return (PFN_vkVoidFunction)WSIBridge_CreateXlibSurfaceKHR;
+    if (strcmp(pName, "vkCreateXcbSurfaceKHR") == 0)  return (PFN_vkVoidFunction)WSIBridge_CreateXcbSurfaceKHR;
+
+    // 3. Device hooks via GIPA (winevulkan resolves these here, not via GDPA)
+    if (strcmp(pName, "vkCreateSwapchainKHR") == 0)   return (PFN_vkVoidFunction)WSIBridge_CreateSwapchainKHR;
+    if (strcmp(pName, "vkDestroySwapchainKHR") == 0)  return (PFN_vkVoidFunction)WSIBridge_DestroySwapchainKHR;
+    if (strcmp(pName, "vkQueuePresentKHR") == 0)      return (PFN_vkVoidFunction)WSIBridge_QueuePresentKHR;
+    if (strcmp(pName, "vkBindImageMemory") == 0)      return (PFN_vkVoidFunction)WSIBridge_BindImageMemory;
+    if (strcmp(pName, "vkBindImageMemory2") == 0 ||
+        strcmp(pName, "vkBindImageMemory2KHR") == 0)  return (PFN_vkVoidFunction)WSIBridge_BindImageMemory2;
+
+    // 4. Fallback to chain — ONLY after all hooks above
+    std::lock_guard<std::mutex> lk(g_lock);
+    auto it = g_instances.find(key(instance));
+    if (it != g_instances.end() && it->second.gip)
+        return it->second.gip(instance, pName);
+    if (g_nextGipaGlobal)
+        return g_nextGipaGlobal(instance, pName);
+    return nullptr;
+}
+```
+
+**A chave é:** os hooks de device (seção 3) devem aparecer **antes** do fallback para a chain (seção 4). Se o Codex colocou os device hooks após o fallback no GIPA, eles nunca serão atingidos porque o fallback retorna primeiro.
+
+## Verificação de sucesso
+
+No próximo logcat, deve aparecer:
+```
+WSIBridge_CreateSwapchainKHR: ...
+WSIBridge_QueuePresentKHR: sent AHB for swapchain image N
+```
+
+Se ainda não aparecer, adicionar log no início de cada hook:
+```cpp
+VkResult WSIBridge_CreateSwapchainKHR(...) {
+    LOGI("WSIBridge_CreateSwapchainKHR: CALLED");
+    ...
+}
+VkResult WSIBridge_QueuePresentKHR(...) {
+    LOGI("WSIBridge_QueuePresentKHR: CALLED");
+    ...
+}
+```
+
+## O que NÃO mudar
+
+Não alterar nada em `VulkanRendererContext.cpp`, `VulkanRenderer.java`, nem o protocolo IPC. A mudança é apenas na ordem dos `strcmp` dentro de `WSIBridge_GetInstanceProcAddr`.
